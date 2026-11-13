@@ -40,6 +40,7 @@ final class TimerSettings: ObservableObject {
     @Published var resetHotkeyModifiers: Int { didSet { ud.set(resetHotkeyModifiers, forKey: "resetHotkeyModifiers") } }
     @Published var calendarExportEnabled: Bool { didSet { ud.set(calendarExportEnabled, forKey: "calendarExportEnabled") } }
     @Published var calendarExportIdentifier: String { didSet { ud.set(calendarExportIdentifier, forKey: "calendarExportIdentifier") } }
+    @Published var dailyNoteExportEnabled: Bool { didSet { ud.set(dailyNoteExportEnabled, forKey: "dailyNoteExportEnabled") } }
     @Published private(set) var launchAtLogin: Bool
     @Published private(set) var loginItemError: String?
 
@@ -70,8 +71,10 @@ final class TimerSettings: ObservableObject {
         resetHotkeyModifiers = (ud.object(forKey: "resetHotkeyModifiers") as? Int) ?? Int(cmdKey + optionKey)
         calendarExportEnabled = (ud.object(forKey: "calendarExportEnabled") as? Bool) ?? false
         calendarExportIdentifier = (ud.object(forKey: "calendarExportIdentifier") as? String) ?? ""
+        dailyNoteExportEnabled = (ud.object(forKey: "dailyNoteExportEnabled") as? Bool) ?? false
         launchAtLogin    = LoginItemController.isEnabled
     }
+    
 
     func minutes(for mode: BreakTimer.Mode) -> Int {
         switch mode {

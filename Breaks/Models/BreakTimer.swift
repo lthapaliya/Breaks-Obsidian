@@ -57,6 +57,8 @@ final class BreakTimer: ObservableObject {
     let clock = TickClock()
     let suggestions = BreakSuggestionLibrary()
     let calendarExporter = CalendarExporter()
+    let sessions = BlockSessionTracker()
+    let vault = ObsidianVaultStore()
     let projects = FocusProjectLibrary()
 
     @Published private(set) var mode: Mode
@@ -95,6 +97,7 @@ final class BreakTimer: ObservableObject {
            savedEndDate > Date() {
             self.remaining = max(1, Int(savedEndDate.timeIntervalSinceNow.rounded()))
             self.isRunning = true
+            if mode == .work { sessions.begin(label: journal.effectiveBlockLabel) }
             self.endDate = savedEndDate
             scheduleTicker()
         } else if let savedRemaining = ud.object(forKey: TimerStorageKey.remaining) as? Int,
@@ -128,6 +131,7 @@ final class BreakTimer: ObservableObject {
         // Save state on quit
         NotificationCenter.default.addObserver(self, selector: #selector(saveStateOnQuit),
                                                name: NSApplication.willTerminateNotification, object: nil)
+        flushAwaitingSession()
     }
 
     deinit {
@@ -175,18 +179,21 @@ final class BreakTimer: ObservableObject {
     func pause() {
         guard isRunning else { return }
         syncRemaining()
+        sessions.pause()
         stopTicker()
         persistTimerState()
     }
 
     func reset() {
         stopTicker()
+        if mode == .work { sessions.end(.stopped) }
         remaining = duration
         persistTimerState()
     }
 
     func skip() {
         let wasRunning = isRunning
+        if wasRunning, mode == .work { sessions.end(.skipped) }
         stopTicker()
         advanceMode()
         if wasRunning { start() }
@@ -209,6 +216,10 @@ final class BreakTimer: ObservableObject {
     }
 
     func resolvePendingBlock(as outcome: FocusOutcome) {
+        if var session = sessions.takeAwaiting() {
+            session.result = (outcome == .good) ? .completed : (outcome == .messy ? .messy : .skipped)
+            appendToDailyNote(session)
+        }
         if outcome == .skipped {
             history.removeCompletionToday()
             completedWorkSessions = max(0, completedWorkSessions - 1)
@@ -294,6 +305,7 @@ final class BreakTimer: ObservableObject {
         let restored = min(duration, remaining + Int(idleSeconds))
         remaining = max(0, restored)
         idlePrompt = IdlePrompt(idleSeconds: idleSeconds)
+        sessions.addIdle(idleSeconds)
         persistTimerState()
     }
 
@@ -308,6 +320,9 @@ final class BreakTimer: ObservableObject {
             completedWorkSessions += 1
             history.addCompletion()
             journal.recordCompletedWork(minutes: settings.workMinutes)
+            if let session = sessions.end(.completed) {
+                sessions.holdForOutcome(session)
+            }
             if settings.calendarExportEnabled {
                 calendarExporter.exportCompletedSession(
                     title: journal.effectiveBlockLabel,
@@ -345,6 +360,7 @@ final class BreakTimer: ObservableObject {
     }
 
     @objc private func handleSleep() {
+        sessions.pause()
         ticker?.invalidate()
         ticker = nil
     }
@@ -357,6 +373,7 @@ final class BreakTimer: ObservableObject {
         } else {
             syncRemaining()
             scheduleTicker()
+            sessions.resume()
             persistTimerState()
         }
     }
@@ -364,6 +381,13 @@ final class BreakTimer: ObservableObject {
     @objc private func saveStateOnQuit() {
         if isRunning { syncRemaining() }
         persistTimerState()
+        flushAwaitingSession()
+    }
+
+    /// A completed block the user never resolved still gets logged.
+    private func flushAwaitingSession() {
+        guard let session = sessions.takeAwaiting() else { return }
+        appendToDailyNote(session)
     }
 
     private func persistTimerState() {
@@ -376,6 +400,38 @@ final class BreakTimer: ObservableObject {
             ud.set(endDate, forKey: TimerStorageKey.endDate)
         } else {
             ud.removeObject(forKey: TimerStorageKey.endDate)
+        }
+    }
+    
+    // MARK: Daily Note Export
+    private func appendToDailyNote(_ session: BlockSession) {
+        guard settings.dailyNoteExportEnabled,
+              !sessions.alreadyExported(session),
+              let endedAt = session.endedAt,
+              let url = vault.logURL()
+        else { return }
+        do {
+            try vault.appendEntry(DailyNoteEntry.markdown(for: session), day: endedAt, to: url)
+            sessions.markExported(session)
+            vault.lastError = nil
+        } catch {
+            vault.lastError = error.localizedDescription
+            sessions.queuePendingExport(session)
+        }
+        flushPendingExports()
+    }
+
+    private func flushPendingExports() {
+        guard settings.dailyNoteExportEnabled else { return }
+        for session in sessions.pendingExports {
+            guard let endedAt = session.endedAt, let url = vault.logURL() else { continue }
+            do {
+                try vault.appendEntry(DailyNoteEntry.markdown(for: session), day: endedAt, to: url)
+                sessions.markExported(session)
+            } catch {
+                vault.lastError = error.localizedDescription
+                return
+            }
         }
     }
 
@@ -414,4 +470,5 @@ final class BreakTimer: ObservableObject {
         sound.volume = Float(settings.volume)
         sound.play()
     }
+    
 }
